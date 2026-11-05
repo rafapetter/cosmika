@@ -1,0 +1,69 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build outputs
+.next/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# turbo
+.turbo
+
+# env files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/
+.claude/*
+# The design skill IS versioned — it's the repo's design system contract.
+!.claude/skills/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Generated code (Protobuf — keep regeneratable)
+# (we DO commit packages/proto/gen so consumers don't need buf)
+
+# Local databases / volumes
+*.sqlite
+*.db
+volumes/
+postgres-data/
+redis-data/
+
+# local attachment storage fallback
+apps/api/tmp/

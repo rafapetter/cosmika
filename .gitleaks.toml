@@ -1,0 +1,55 @@
+# Default gitleaks rules plus the two known placeholders that trip the
+# generic-api-key rule. Anything else it finds stops the export.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fixed test passwords"
+regexes = ['''pw1234567890''']
+
+[[allowlists]]
+description = "An empty ANTHROPIC_API_KEY= followed by the stub switch on the next line"
+regexes = ['''COSMIKA_AI_STUB''']
+
+# ── Our providers, any length ────────────────────────────────────────────
+# The default rules want exact key formats and let a truncated or reshaped
+# key through (tested: `ANTHROPIC_API_KEY=sk-ant-<40 chars>` passed). For
+# the providers Cosmika actually uses, anything with the right prefix fails
+# the export.
+
+[[rules]]
+id = "cosmika-anthropic"
+description = "Anthropic key prefix, any length"
+regex = '''sk-ant-[A-Za-z0-9_\-]{16,}'''
+
+[[rules]]
+id = "cosmika-openai"
+description = "OpenAI key prefix"
+regex = '''\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}'''
+
+[[rules]]
+id = "cosmika-resend"
+description = "Resend key"
+regex = '''\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{16,}'''
+
+[[rules]]
+id = "cosmika-meta"
+description = "Meta / WhatsApp access token (real ones run past 120 chars; short EAA runs are base64 image data)"
+regex = '''\bEAA[A-Za-z0-9]{120,}'''
+
+[[rules]]
+id = "cosmika-asaas"
+description = "Asaas key"
+regex = '''\$aact_(?:prod|hmlg)_[A-Za-z0-9_\-]{10,}'''
+
+[[rules]]
+id = "cosmika-db-url"
+description = "Database URL carrying a password"
+regex = '''postgres(?:ql)?://[^:\s/@]+:[^@\s/]{4,}@[^\s'"]+'''
+[rules.allowlist]
+description = "Local dev and documented placeholders"
+regexes = [
+  '''://[^:]+:(?:cosmika|postgres|password|change-me|changeme|\$\{[A-Z_]+\}|\$[A-Z_]+)@''',
+  # compose interpolation: user and password both come from the environment
+  '''://\$\{[A-Z_]+(?::-[A-Za-z0-9_]*)?\}:\$\{[A-Z_]+\}@''',
+]

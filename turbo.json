@@ -1,0 +1,77 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [
+    ".env",
+    ".env.local",
+    "tsconfig.json"
+  ],
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL",
+    "REDIS_URL"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        ".next/**",
+        "!.next/cache/**",
+        "dist/**"
+      ]
+    },
+    "lint": {
+      "dependsOn": [
+        "^build"
+      ]
+    },
+    "test": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "coverage/**"
+      ]
+    },
+    "test:coverage": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "coverage/**"
+      ]
+    },
+    "typecheck": {
+      "dependsOn": [
+        "^build"
+      ]
+    },
+    "dev": {
+      "dependsOn": [
+        "^build"
+      ],
+      "cache": false,
+      "persistent": true
+    },
+    "clean": {
+      "cache": false
+    },
+    "generate": {
+      "cache": false
+    },
+    "@cosmika/db#build": {
+      "dependsOn": [
+        "@cosmika/db#generate"
+      ],
+      "outputs": [
+        "dist/**"
+      ]
+    },
+    "@cosmika/db#typecheck": {
+      "dependsOn": [
+        "@cosmika/db#generate"
+      ]
+    }
+  }
+}

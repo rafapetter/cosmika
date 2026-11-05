@@ -1,0 +1,51 @@
+{
+  "name": "cosmika",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Cosmika — AI-first customer service platform (replaces Cosmobots Nebula).",
+  "packageManager": "pnpm@9.15.2",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "db:generate": "pnpm --filter @cosmika/db generate",
+    "db:migrate": "pnpm --filter @cosmika/db migrate",
+    "db:reset": "pnpm --filter @cosmika/db reset",
+    "proto:generate": "pnpm --filter @cosmika/proto generate",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:logs": "docker compose logs -f",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "e2e:auth": "node scripts/e2e-auth.mjs",
+    "e2e:inboxes": "node scripts/e2e-inboxes.mjs",
+    "e2e:contacts": "node scripts/e2e-contacts.mjs",
+    "e2e:conversations": "node scripts/e2e-conversations.mjs",
+    "e2e:ai": "node scripts/e2e-ai.mjs",
+    "e2e:widget": "node scripts/e2e-widget.mjs",
+    "e2e:realtime": "node scripts/e2e-realtime.mjs",
+    "e2e:teams": "node scripts/e2e-teams.mjs",
+    "e2e:reports": "node scripts/e2e-reports.mjs",
+    "e2e:automation": "node scripts/e2e-automation.mjs",
+    "e2e:whatsapp": "node scripts/e2e-whatsapp.mjs",
+    "e2e:attachments": "node scripts/e2e-attachments.mjs",
+    "e2e:ai-extras": "node scripts/e2e-ai-extras.mjs",
+    "e2e:tier3": "node scripts/e2e-tier3.mjs",
+    "e2e": "node scripts/e2e-auth.mjs && node scripts/e2e-inboxes.mjs && node scripts/e2e-contacts.mjs && node scripts/e2e-conversations.mjs && node scripts/e2e-ai.mjs && node scripts/e2e-widget.mjs && node scripts/e2e-realtime.mjs && node scripts/e2e-teams.mjs && node scripts/e2e-reports.mjs && node scripts/e2e-automation.mjs && node scripts/e2e-whatsapp.mjs && node scripts/e2e-attachments.mjs && node scripts/e2e-ai-extras.mjs && node scripts/e2e-tier3.mjs && node scripts/e2e-flows.mjs",
+    "migration-trial": "node scripts/migration-trial.mjs"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "pg": "^8.20.0",
+    "prettier": "^3.4.0",
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.0",
+    "ws": "^8.20.1"
+  }
+}

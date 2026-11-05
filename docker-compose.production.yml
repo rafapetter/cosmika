@@ -1,0 +1,198 @@
+# Production-shaped compose. Bring up with:
+#   docker compose -f docker-compose.production.yml --env-file .env.production up -d
+#
+# Env file lists every secret/value not baked into images. See
+# .env.production.example for the full set.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cosmika}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-cosmika}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cosmika}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 3110
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cosmika}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cosmika}?schema=public
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-10}
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Standby route for `vendor/model` agents (OpenRouter). Empty = those
+      # agents skip their turn instead of calling anyone.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
+      # Optional gateway in front of the model providers (LiteLLM, OpenRouter,
+      # a platform gateway). Empty = talk to the providers directly.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      COSMIKA_AI_STUB: ${COSMIKA_AI_STUB:-0}
+      COSMIKA_DISABLE_THROTTLE: ${COSMIKA_DISABLE_THROTTLE:-0}
+      # Who may set the client IP via X-Forwarded-For. Empty = loopback and
+      # the Docker gateway (Caddy on the host). See apps/api/src/common/trust-proxy.ts.
+      COSMIKA_TRUST_PROXY: ${COSMIKA_TRUST_PROXY:-}
+      # Flow Code-block sandbox (isolated-vm). Verified building + running on
+      # this box 2026-08-05; without it every Code block is a silent no-op and
+      # V1-imported flows take wrong branches.
+      COSMIKA_CODE_SANDBOX: ${COSMIKA_CODE_SANDBOX:-0}
+      # Daily cap on AI deviation-classification calls (GUIDED off-script
+      # handling); over the cap the runner degrades deterministically.
+      COSMIKA_DEVIATION_DAILY_CAP: ${COSMIKA_DEVIATION_DAILY_CAP:-2000}
+      WIDGET_JWT_SECRET: ${WIDGET_JWT_SECRET}
+      # Encryption at rest for channel credentials (WhatsApp access token,
+      # app secret, webhook verify token). 32 random bytes in base64:
+      # openssl rand -base64 32. The API refuses to boot in production
+      # without it, and refuses to boot with a key of the wrong length.
+      COSMIKA_SECRETS_KEY: ${COSMIKA_SECRETS_KEY:-}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://app.example.com}
+      PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-https://app.example.com}
+      # Attachments
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      ATTACHMENTS_MAX_BYTES: ${ATTACHMENTS_MAX_BYTES:-26214400}
+      # Transactional email (password resets) + beta signup gate
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      # Sender on your verified domain, e.g. "Acme <no-reply@acme.com>".
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      # Who receives "upgrade my plan" requests. Unset: recorded, not e-mailed.
+      COSMIKA_BILLING_NOTIFY_EMAIL: ${COSMIKA_BILLING_NOTIFY_EMAIL:-}
+      # Your product name in the public API reference (default Cosmika).
+      COSMIKA_BRAND_NAME: ${COSMIKA_BRAND_NAME:-}
+      COSMIKA_SIGNUP_INVITE_CODE: ${COSMIKA_SIGNUP_INVITE_CODE:-}
+      # Optional external billing API (price + subscription authority). Both
+      # URL and secret unset => no billing: signup returns no checkout link
+      # and the access gate allows everything.
+      COSMIKA_BILLING_API_URL: ${COSMIKA_BILLING_API_URL:-}
+      COSMIKA_BILLING_API_SECRET: ${COSMIKA_BILLING_API_SECRET:-}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-https://api.example.com}
+      # WhatsApp
+      WHATSAPP_GRAPH_BASE_URL: ${WHATSAPP_GRAPH_BASE_URL:-https://graph.facebook.com/v20.0}
+      COSMIKA_WHATSAPP_STUB: ${COSMIKA_WHATSAPP_STUB:-0}
+      # WhatsApp Embedded Signup (Tech Provider). Off unless set to 1; see
+      # docs/whatsapp-embedded-signup.md.
+      WHATSAPP_EMBEDDED_SIGNUP_ENABLED: ${WHATSAPP_EMBEDDED_SIGNUP_ENABLED:-0}
+      WHATSAPP_EMBEDDED_SIGNUP_ACCOUNT_IDS: ${WHATSAPP_EMBEDDED_SIGNUP_ACCOUNT_IDS:-}
+      META_APP_ID: ${META_APP_ID:-100000000000001}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_ES_CONFIG_ID: ${META_ES_CONFIG_ID:-200000000000002}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-v25.0}
+      # Messenger / Instagram: events for Pages that are not Cosmika inboxes go
+      # back, untouched and signed, to the system that still owns them.
+      META_RELAY_PAGE_URL: ${META_RELAY_PAGE_URL:-}
+      META_RELAY_INSTAGRAM_URL: ${META_RELAY_INSTAGRAM_URL:-}
+      # Sentry
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Loopback only. Caddy runs with network_mode host and proxies to
+    # 127.0.0.1; a bare "3110:3110" binds 0.0.0.0 and [::], and Docker's
+    # iptables rules go around ufw, so on 2026-10-20 the API, web and realtime
+    # answered plain HTTP from the internet, skipping Caddy. The API also
+    # trusts X-Forwarded-For from the Docker gateway (see trust-proxy.ts),
+    # which is only safe while nothing outside this host can reach the port.
+    ports:
+      - "127.0.0.1:3110:3110"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3110/ready || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  realtime:
+    build:
+      context: .
+      dockerfile: apps/realtime/Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 3120
+      API_BASE: http://api:3110
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://app.example.com}
+      SENTRY_DSN: ${SENTRY_DSN_REALTIME:-${SENTRY_DSN:-}}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    # Loopback only, see the api service.
+    ports:
+      - "127.0.0.1:3120:3120"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Baked into the client bundle at build time (Next.js NEXT_PUBLIC_*).
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.example.com}
+        NEXT_PUBLIC_REALTIME_URL: ${NEXT_PUBLIC_REALTIME_URL:-wss://realtime.example.com/ws}
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        # Shown to your users: privacy contact and billing contact.
+        NEXT_PUBLIC_SUPPORT_EMAIL: ${NEXT_PUBLIC_SUPPORT_EMAIL:-}
+        NEXT_PUBLIC_FINANCE_EMAIL: ${NEXT_PUBLIC_FINANCE_EMAIL:-}
+    environment:
+      NODE_ENV: production
+      PORT: 3100
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.example.com}
+      NEXT_PUBLIC_REALTIME_URL: ${NEXT_PUBLIC_REALTIME_URL:-wss://realtime.example.com/ws}
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+    depends_on:
+      api:
+        condition: service_healthy
+    # Loopback only, see the api service.
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  redis-data:

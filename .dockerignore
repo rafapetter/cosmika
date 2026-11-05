@@ -1,0 +1,15 @@
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/*.tsbuildinfo
+**/coverage
+**/.env
+**/.env.local
+**/.env.*.local
+**/.git
+**/.github
+**/.gitlab
+**/postgres-data
+**/redis-data
+**/.DS_Store

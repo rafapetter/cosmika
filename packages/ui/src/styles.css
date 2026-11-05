@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Cosmika design system tokens.
+ *
+ * Visual language follows Twenty (twentyhq/twenty). Their token VALUES come
+ * from `packages/twenty-ui`, which is MIT-licensed (the main app is AGPL —
+ * the component library is deliberately not). We reimplement the values in
+ * our own Tailwind/CSS-variable stack rather than vendoring their Emotion
+ * components, so nothing of theirs is copied into this codebase.
+ *   Twenty UI © 2023-present Twenty.com, PBC — MIT.
+ *
+ * What defines the look, and why each matters:
+ *   · text is #333 / #666, never pure black — the single biggest difference
+ *   · hairline borders (#F1F1F1 light, #EBEBEB medium) instead of visible ones
+ *   · surfaces are near-white steps (#FFF → #FCFCFC → #F1F1F1), not gray boxes
+ *   · 4px radius on controls (we were at 8px, which reads soft/consumer)
+ *   · small type: 13-15px body, so density comes from the scale not cramming
+ *   · blue accent, and shadows so faint they only separate layers
+ *
+ * The chat thread keeps its own WhatsApp-comfortable canvas below.
+ */
+
+@layer base {
+  :root {
+    /* Surfaces — pure-ish neutrals */
+    --background: 0 0% 100%;
+    --surface: 0 0% 99%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 20%;
+    --foreground: 0 0% 20%;
+    --muted: 0 0% 95%;
+    --muted-foreground: 0 0% 40%;
+    --subtle: 0 0% 92%;
+
+    /* Borders — very faint */
+    --border: 0 0% 95%;
+    --border-strong: 0 0% 84%;
+    --input: 0 0% 92%;
+    --ring: 214 100% 53%;
+
+    /* Accent */
+    --primary: 214 100% 53%;
+    --primary-foreground: 0 0% 100%;
+    --primary-subtle: 214 100% 96%;
+
+    --secondary: 0 0% 95%;
+    --secondary-foreground: 0 0% 20%;
+    --accent: 0 0% 95%;
+    --accent-foreground: 0 0% 20%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 10%;
+
+    --status-open: 211 92% 45%;
+    --status-pending: 38 92% 50%;
+    --status-resolved: 142 71% 45%;
+
+    /* WhatsApp light: canvas #efeae2, inbound #fff, outbound #d9fdd3 */
+    --chat-canvas: 36 25% 90%;
+    --chat-inbound: 0 0% 100%;
+    --chat-outbound: 113 88% 91%;
+    --chat-bubble-foreground: 200 6% 12%;
+    --chat-meta: 200 5% 45%;
+    --chat-tick: 196 100% 41%;
+    --chat-private: 50 100% 90%;
+    --chat-system: 36 30% 86%;
+
+    /* Twenty: 4px on controls, 8px on surfaces. Ours were 8/6/12 — softer,
+       and the main reason the app read "consumer" rather than "tool". */
+    --radius: 0.25rem;
+    --radius-sm: 0.125rem;
+    --radius-lg: 0.5rem;
+    --radius-full: 9999px;
+
+    --font-sans: var(--font-inter), Inter, ui-sans-serif, system-ui, -apple-system,
+      BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+      sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      'Liberation Mono', 'Courier New', monospace;
+
+    /* Faint enough to separate layers without announcing themselves. */
+    --shadow-xs: 0 1px 2px 0 hsl(0 0% 20% / 0.04);
+    --shadow-sm: 0 2px 4px 0 hsl(0 0% 20% / 0.06), 0 0 4px 0 hsl(0 0% 20% / 0.04);
+    --shadow-md: 2px 4px 16px 0 hsl(0 0% 20% / 0.08), 0 2px 4px 0 hsl(0 0% 20% / 0.06);
+  }
+
+  .dark {
+    --background: 0 0% 9%;
+    --surface: 0 0% 11%;
+    --card: 0 0% 11%;
+    --card-foreground: 0 0% 89%;
+    --foreground: 0 0% 89%;
+    --muted: 0 0% 16%;
+    --muted-foreground: 0 0% 62%;
+    --subtle: 0 0% 20%;
+
+    --border: 0 0% 16%;
+    --border-strong: 0 0% 25%;
+    --input: 0 0% 20%;
+    --ring: 214 100% 60%;
+
+    --primary: 214 100% 60%;
+    --primary-foreground: 0 0% 9%;
+    --primary-subtle: 214 60% 20%;
+
+    --secondary: 0 0% 16%;
+    --secondary-foreground: 0 0% 89%;
+    --accent: 0 0% 16%;
+    --accent-foreground: 0 0% 89%;
+
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 96%;
+    --success: 142 61% 50%;
+    --warning: 38 92% 55%;
+
+    --status-open: 211 92% 60%;
+    --status-pending: 38 92% 55%;
+    --status-resolved: 142 61% 50%;
+
+    /* WhatsApp dark: canvas #0b141a, inbound #202c33, outbound #005c4b */
+    --chat-canvas: 200 24% 8%;
+    --chat-inbound: 200 14% 16%;
+    --chat-outbound: 170 100% 18%;
+    --chat-bubble-foreground: 0 0% 96%;
+    --chat-meta: 200 8% 60%;
+    --chat-tick: 196 95% 65%;
+    --chat-private: 45 50% 22%;
+    --chat-system: 200 14% 14%;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3 {
+    letter-spacing: -0.015em;
+  }
+}
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .text-pretty  { text-wrap: pretty; }
+}

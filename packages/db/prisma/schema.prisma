@@ -1,0 +1,1545 @@
+// Cosmika DB schema — Prisma
+//
+// P0 modules:
+//   - Auth + Accounts + Users (Module 1)
+//   - Inboxes + Channels (Module 2)
+//   - Contacts + ContactInboxes (Module 3)
+//   - Conversations + Messages + Attachments (Module 4)
+//   - AgentBots + AiAgentSessions (Module 5)
+//   - Teams + InboxMembers (auxiliary)
+//
+// See: docs/p0-module-specification.md
+// See: docs/adr/0003-ai-first-architecture.md
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+  // Native for local dev (mac arm64 → darwin-arm64); linux-musl-* for the
+  // alpine production Docker images; debian-openssl-3.0.x for the
+  // bookworm-based GitLab CI runner.
+  binaryTargets   = ["native", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector"), pg_trgm]
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MODULE 1: AUTH + ACCOUNTS + USERS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Account {
+  id                         String        @id @default(cuid())
+  slug                       String        @unique // url-safe identifier
+  name                       String
+  domain                     String?
+  status                     AccountStatus @default(ACTIVE)
+  plan                       Plan          @default(ROCKET)
+  paying                     Boolean       @default(false)
+  trialExpiresAt             DateTime?
+  asaasCustomerId            String?
+  // Payment link cosmo-admin issued at signup. Shown on the "subscription
+  // ended" screen so a locked-out account can pay without talking to anyone.
+  billingCheckoutUrl         String?
+  // Brand/UI customization
+  brandSettings              Json? // colors, logo URL, etc.
+  // AI configuration
+  aiSettings                 Json? // system prompt, tools enabled, budget caps
+  // Hard ceiling on AI spend for the calendar month, across every bot on the
+  // account. The per-bot `dailyBudgetUsd` is a burst guard.
+  //
+  // Internal cost protection, NOT the customer's limit (decision 9). The
+  // customer's limit is the AI allowance below, counted in conversations and
+  // capped in reais. This one exists so a runaway month cannot cost more than
+  // the account is worth; it alerts the operation and only cuts off accounts
+  // that have never paid.
+  monthlyAiBudgetUsd         Decimal       @default(15.00) @db.Decimal(10, 2)
+  // The customer's own ceiling on AI overage for a billing month, in BRL, set
+  // by an administrator on the billing screen. Null = no ceiling (the
+  // default, and what the terms promise). Only meaningful on plans that have
+  // AI overage at all: on Rocket the AI simply stands down at the allowance.
+  aiOverageCapBrl            Decimal?      @db.Decimal(10, 2)
+  // Per-account exceptions, written by cosmo-admin's plan mirror and never by
+  // the customer (decision 17). `aiAllowanceOverride` replaces the plan's
+  // included conversations; -1 means unlimited. An override with a past or
+  // unparseable date counts as expired, so a forgotten pilot closes itself.
+  aiAllowanceOverride        Int?
+  aiAllowanceOverrideUntil   DateTime?
+  limitsOverrideUntil        DateTime?
+  // Admin assistant: when true, a tool marked critical is queued for a human
+  // to approve before it runs. When false the assistant applies critical
+  // changes directly. Defaults to true — the safer mode has to be opted out
+  // of, not into.
+  adminAgentRequiresApproval Boolean       @default(true)
+  // When true, an agent only sees the conversations of teams they belong to
+  // (plus unteamed ones in their inboxes, and anything assigned to them or
+  // where they take part). Off by default: inbox membership alone decides.
+  teamScopedVisibility       Boolean       @default(false)
+  // Which survey goes out when a conversation is resolved on an inbox with
+  // `csatEnabled`: CSAT 1 to 5, or NPS 0 to 10 (pilot item 14).
+  surveyType                 SurveyType    @default(CSAT)
+  // Locale / timezone
+  defaultLocale              String        @default("pt-BR")
+  defaultTimezone            String        @default("America/Sao_Paulo")
+  createdAt                  DateTime      @default(now())
+  updatedAt                  DateTime      @updatedAt
+
+  members                 AccountMember[]
+  inboxes                 Inbox[]
+  contacts                Contact[]
+  conversations           Conversation[]
+  messages                Message[]
+  agentBots               AgentBot[]
+  teams                   Team[]
+  workingHours            WorkingHour[]
+  holidays                Holiday[]
+  automationRules         AutomationRule[]
+  attachments             Attachment[]
+  cannedResponses         CannedResponse[]
+  labels                  Label[]
+  notifications           Notification[]
+  savedViews              SavedView[]
+  customAttributes        CustomAttribute[]
+  agentAvailabilities     AgentAvailability[]
+  auditLogs               AuditLog[]
+  webhooks                Webhook[]
+  csatSurveys             CsatSurvey[]
+  slaPolicies             SlaPolicy[]
+  articles                Article[]
+  adminAgentSessions      AdminAgentSession[]
+  apiKeys                 ApiKey[]
+  broadcasts              Broadcast[]
+  contactNotes            ContactNote[]
+  notificationPreferences NotificationPreference[]
+  supportTickets          SupportTicket[]
+  flows                   Flow[]
+  aiUsageEvents           AiUsageEvent[]
+  usageAlerts             UsageAlert[]
+  profile                 AccountProfile?
+
+  @@index([status, paying])
+  @@index([asaasCustomerId])
+}
+
+/// Commercial profile of the account: what the company does, and what it
+/// means to use. Collected by the welcome flow, one row per account.
+///
+/// Separate from `Account` on purpose. `Account` is operational configuration,
+/// read on almost every request and shipped whole to the web client by
+/// `toAccountDTO`. This is OUR commercial data ABOUT the customer: it has no
+/// business travelling in the session payload, and it has to be deletable
+/// without touching how the account works. Never add these fields to
+/// `toAccountDTO` (there is a test that asserts it).
+model AccountProfile {
+  id        String @id @default(cuid())
+  accountId String @unique
+
+  // ─── Business
+  businessIndustry    String? // closed list, see BusinessIndustry in @cosmika/shared
+  companySize         String? // closed list
+  businessDescription String? @db.Text
+
+  // ─── Support today
+  supportToday       String? // closed list
+  channelsToday      String[] @default([])
+  conversationVolume String? // band, aligned with PLAN_CAPS
+
+  // ─── Intended use. Recorded only: it enables nothing and prices nothing.
+  intendedFeatures String[] @default([])
+  expectedVolume   String? // same band scale as conversationVolume
+  expectedAiShare  String? // closed list
+
+  // ─── Flow state. This is what makes the funnel measurable in SQL without
+  // adding an analytics tool: AuditLog is pruned at 90 days, so it cannot
+  // carry the history.
+  version        Int       @default(1)
+  startedAt      DateTime  @default(now())
+  lastStep       String? // 'company' | 'admin' | 'business' | 'intent' | 'done'
+  completedAt    DateTime?
+  skippedAt      DateTime?
+  filledByUserId String?
+
+  /// A new answer lands here before it earns a column, so the questionnaire
+  /// can keep changing without a migration per question.
+  ///
+  /// This is also where the fiscal fields would land if they ever move into
+  /// this table: CNPJ or NIF, legal name, and the administrator's job title
+  /// are deliberately NOT asked during onboarding (they belong to the billing
+  /// conversation, at the end of the trial), and if that changes they fit
+  /// here with no migration at all. They earn columns when something starts
+  /// querying them.
+  extra Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account  Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  filledBy User?   @relation("AccountProfileFilledBy", fields: [filledByUserId], references: [id], onDelete: SetNull)
+
+  @@index([completedAt])
+  @@index([businessIndustry])
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+enum Plan {
+  EXPLORER
+  JETPACK
+  ROCKET
+  SPACESHIP
+  ENTERPRISE
+  PARTNER
+  MASTER
+}
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  emailVerifiedAt   DateTime?
+  passwordHash      String?
+  fullName          String?
+  avatarUrl         String?
+  // Contact number of the person, asked for by the welcome flow so we can
+  // warn them when a channel goes down. Operational, not a marketing list.
+  phone             String?
+  ssoProvider       String?
+  lastSignInAt      DateTime?
+  locale            String    @default("pt-BR")
+  // 2FA — TOTP secret + recovery codes (sha256 hashes, JSON array).
+  totpEnabled       Boolean   @default(false)
+  totpSecret        String?
+  totpRecoveryCodes Json?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  memberships              AccountMember[]
+  sessions                 Session[]
+  assignedConversations    Conversation[]            @relation("AssignedConversations")
+  conversationParticipants ConversationParticipant[]
+  inboxMemberships         InboxMember[]
+  teamMemberships          TeamMember[]
+  sentMessages             Message[]                 @relation("UserSentMessages")
+  uploadedAttachments      Attachment[]
+  notificationsReceived    Notification[]            @relation("NotificationsForUser")
+  notificationsSent        Notification[]            @relation("NotificationsByUser")
+  savedViews               SavedView[]
+  auditEntries             AuditLog[]                @relation("AuditActor")
+  contactNotes             ContactNote[]
+  notificationPreferences  NotificationPreference[]
+  adminAgentSessions       AdminAgentSession[]
+  filledProfiles           AccountProfile[]          @relation("AccountProfileFilledBy")
+
+  @@index([email])
+}
+
+model AccountMember {
+  id                 String    @id @default(cuid())
+  accountId          String
+  userId             String
+  role               Role      @default(AGENT)
+  isActive           Boolean   @default(true)
+  // When automatic distribution last handed this member a conversation. The
+  // round robin gives the next one to the available member who has waited
+  // longest (never assigned first). Null until the first automatic assignment.
+  lastAutoAssignedAt DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  account        Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  availabilities AgentAvailability[]
+
+  @@unique([accountId, userId])
+  @@index([userId])
+  @@index([accountId, role])
+}
+
+enum Role {
+  ADMINISTRATOR
+  SUPERVISOR
+  AGENT
+  BOT
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  token        String   @unique
+  expiresAt    DateTime
+  ipAddress    String?
+  userAgent    String?
+  // For 2FA challenge sessions (token prefixed `chal_`): incremented on every
+  // failed redeem. The row is deleted once attempts >= 5 to prevent brute
+  // force inside the 5-minute challenge window. Always 0 on real sessions.
+  totpAttempts Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MODULE 2: INBOXES + CHANNELS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Inbox {
+  id                  String          @id @default(cuid())
+  accountId           String
+  name                String
+  channelType         ChannelType
+  channelConfig       Json // provider creds, widget settings, etc.
+  agentBotId          String?
+  // Behavior
+  greetingEnabled     Boolean         @default(false)
+  greetingMessage     String?
+  outOfOfficeMessage  String?
+  workingHoursEnabled Boolean         @default(false)
+  // Sent to the contact when an agent resolves a conversation, before the
+  // CSAT survey. Takes {{contact.name}}-style variables; null = nothing sent.
+  closingMessage      String?
+  // CSAT survey on conversation resolution
+  csatEnabled         Boolean         @default(false)
+  // AI mode: how aggressively AI handles inbound
+  aiAutoreplyMode     AiAutoreplyMode @default(DRAFT)
+  // Auto-resolve idle conversations
+  autoResolveMinutes  Int             @default(10080) // 7 days
+  // Deterministic flow run by the bot on this inbox (hybrid flow + AI agent).
+  defaultFlowId       String?
+  flowMode            FlowMode        @default(OFF)
+  // GUIDED-mode deviation handling: how the AI treats off-script replies, and
+  // how many deviations before escalating to a human.
+  deviationPolicy     String          @default("answer_and_return")
+  maxDeviations       Int             @default(3)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  // Optional SLA policy that governs first-response/resolution targets per
+  // priority for conversations in this inbox.
+  slaPolicyId       String?
+  account           Account            @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  agentBot          AgentBot?          @relation(fields: [agentBotId], references: [id])
+  defaultFlow       Flow?              @relation("InboxDefaultFlow", fields: [defaultFlowId], references: [id], onDelete: SetNull)
+  contactInboxes    ContactInbox[]
+  conversations     Conversation[]
+  members           InboxMember[]
+  workingHours      WorkingHour[]
+  whatsappTemplates WhatsappTemplate[]
+  broadcasts        Broadcast[]
+  slaPolicy         SlaPolicy?         @relation(fields: [slaPolicyId], references: [id], onDelete: SetNull)
+
+  @@index([accountId])
+  @@index([accountId, channelType])
+  @@index([agentBotId])
+  @@index([defaultFlowId])
+  @@index([slaPolicyId])
+}
+
+enum BroadcastStatus {
+  DRAFT
+  SENDING
+  SENT
+  FAILED
+}
+
+// A bulk WhatsApp send: one approved template, fanned out to an audience of
+// contacts reachable on a WhatsApp inbox. Each recipient becomes (or reuses)
+// a conversation so replies land in the inbox.
+model Broadcast {
+  id              String          @id @default(cuid())
+  accountId       String
+  inboxId         String
+  name            String
+  templateId      String // WhatsappTemplate id
+  // Static values filling the template body {{1}}..{{n}} (same for every
+  // recipient in v1).
+  variables       Json            @default("[]")
+  // Audience selector resolved at send time, e.g. { country: "BR" }. Empty =
+  // every contact reachable on the inbox.
+  audience        Json            @default("{}")
+  status          BroadcastStatus @default(DRAFT)
+  totalRecipients Int             @default(0)
+  sentCount       Int             @default(0)
+  failedCount     Int             @default(0)
+  createdById     String?
+  sentAt          DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  inbox   Inbox   @relation(fields: [inboxId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([accountId, status])
+}
+
+enum FlowStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+// How an inbox blends the deterministic flow with the AI agent.
+enum FlowMode {
+  OFF // pure AI agent (default)
+  STRICT // deterministic flow only; non-matching input retries/handoffs
+  GUIDED // deterministic happy-path + AI handles deviations
+}
+
+// A deterministic conversation flow (Typebot/Cosmo-Flows-compatible graph).
+// `definition` is the editable draft; `published` is the snapshot the engine
+// runs. Shape: { groups:[{id,blocks:[{id,type,...}]}], edges:[], variables:[] }.
+model Flow {
+  id         String     @id @default(cuid())
+  accountId  String
+  name       String
+  status     FlowStatus @default(DRAFT)
+  definition Json
+  published  Json?
+  // Original id in the source system (Nebula `flows.id`) for migrated flows.
+  // Cosmoflow-link blocks reference sub-flows by this id, so the runner resolves
+  // links to Cosmika Flow rows via (accountId, externalId).
+  externalId String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  inboxes Inbox[] @relation("InboxDefaultFlow")
+
+  @@unique([accountId, externalId])
+  @@index([accountId])
+}
+
+// A Meta-approved WhatsApp message template (HSM). Required to message a
+// contact proactively or outside the 24h customer-service window. Synced
+// from the WhatsApp Business Account via the Graph API.
+model WhatsappTemplate {
+  id            String   @id @default(cuid())
+  inboxId       String
+  // Template name (unique per WABA + language). Lowercase snake_case.
+  name          String
+  // BCP-47-ish language code Meta uses, e.g. "pt_BR", "en_US".
+  language      String
+  // MARKETING | UTILITY | AUTHENTICATION
+  category      String
+  // APPROVED | PENDING | REJECTED | PAUSED | DISABLED
+  status        String
+  // Rendered BODY text with {{1}}, {{2}} placeholders — for display + the
+  // composer's variable inputs.
+  body          String
+  // Number of {{n}} placeholders in the body.
+  variableCount Int      @default(0)
+  // Full Meta components array (header/body/footer/buttons) for the send call.
+  components    Json     @default("[]")
+  // Meta's template id, when known.
+  externalId    String?
+  syncedAt      DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  inbox Inbox @relation(fields: [inboxId], references: [id], onDelete: Cascade)
+
+  @@unique([inboxId, name, language])
+  @@index([inboxId])
+}
+
+enum ChannelType {
+  WHATSAPP
+  WEB_WIDGET
+  EMAIL
+  API
+  TELEGRAM
+  FACEBOOK
+  INSTAGRAM
+}
+
+enum AiAutoreplyMode {
+  DRAFT // AI suggests, human sends
+  AUTO_SAFE // AI sends low-risk; escalates uncertain
+  AUTO_FULL // AI handles everything; human only on escalation
+}
+
+model InboxMember {
+  id        String   @id @default(cuid())
+  inboxId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  inbox Inbox @relation(fields: [inboxId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([inboxId, userId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MODULE 3: CONTACTS + CONTACT INBOXES
+// ─────────────────────────────────────────────────────────────────────────
+
+model Contact {
+  id                   String    @id @default(cuid())
+  accountId            String
+  name                 String?
+  email                String?
+  phoneNumber          String?
+  identifier           String?
+  pubsubToken          String?
+  customAttributes     Json      @default("{}")
+  additionalAttributes Json      @default("{}")
+  avatarUrl            String?
+  lastActivityAt       DateTime?
+  // When set, the contact is blocked: their inbound messages are dropped on
+  // ingest and the UI flags them. Null = not blocked.
+  blockedAt            DateTime?
+  aiEnrichedAt         DateTime?
+  aiEnrichmentData     Json?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  account        Account         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contactInboxes ContactInbox[]
+  conversations  Conversation[]
+  notes          ContactNote[]
+  supportTickets SupportTicket[]
+
+  @@index([accountId])
+  @@index([accountId, phoneNumber])
+  @@index([accountId, email])
+  @@index([accountId, identifier])
+}
+
+// A free-text internal note an agent attaches to a contact (team reference,
+// not visible to the customer).
+model ContactNote {
+  id        String   @id @default(cuid())
+  accountId String
+  contactId String
+  authorId  String?
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  author  User?   @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([contactId])
+}
+
+model ContactInbox {
+  id           String   @id @default(cuid())
+  contactId    String
+  inboxId      String
+  sourceId     String?
+  // Meta WhatsApp Business-Scoped User ID (2026 usernames rollout). Webhooks
+  // carry contacts[].user_id and may omit wa_id entirely; this is the durable
+  // per-portfolio key. sourceId stays the phone when known, or the BSUID for
+  // phone-less (username-only) users.
+  bsuid        String?
+  hmacVerified Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  contact       Contact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  inbox         Inbox          @relation(fields: [inboxId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@unique([contactId, inboxId])
+  @@unique([inboxId, sourceId])
+  @@unique([inboxId, bsuid])
+  @@index([inboxId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MODULE 4: CONVERSATIONS + MESSAGES + ATTACHMENTS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Conversation {
+  id                          String             @id @default(cuid())
+  // Per-account auto-increment shown in the UI as `#42`. Globally unique
+  // (autoincrement is a Postgres sequence) but only displayed per-account.
+  displayId                   Int                @default(autoincrement())
+  accountId                   String
+  inboxId                     String
+  contactId                   String
+  contactInboxId              String
+  assigneeId                  String?
+  teamId                      String?
+  status                      ConversationStatus @default(OPEN)
+  // When a real message last landed in this conversation. Distinct from
+  // `updatedAt`, which Prisma bumps on ANY row write (a label, a bulk
+  // migration, an assignment) and therefore cannot order an inbox.
+  // Activity notes deliberately do NOT bump this — labelling a 2021 thread
+  // must not float it to the top of everyone's list.
+  lastMessageAt               DateTime?
+  // Who is currently driving the conversation. BOT while the AI agent is
+  // auto-handling; flips to HUMAN on assignment/takeover. Orthogonal to
+  // `status` (which is the lifecycle: open / pending / resolved).
+  controlMode                 ControlMode        @default(HUMAN)
+  priority                    Priority           @default(NORMAL)
+  // Timestamps for lifecycle metrics
+  agentLastSeenAt             DateTime?
+  contactLastSeenAt           DateTime?
+  firstReplyAt                DateTime?
+  resolvedAt                  DateTime?
+  // When the sla_breached webhook was dispatched for this conversation, so
+  // the sweep never fires twice for the same breach.
+  slaBreachedNotifiedAt       DateTime?
+  // When the conversation last entered the human queue (control flipped to
+  // HUMAN). The first-response SLA clock starts here, not while a bot is
+  // talking; null means it was human from the start (use createdAt).
+  queuedAt                    DateTime?
+  // The service protocol the contact is told. Shared by every conversation of
+  // the same contact, on any channel, while a case is open or for 24 h after
+  // it closed: Webchat today and WhatsApp tomorrow keep one number.
+  protocol                    String?
+  reopenedAt                  DateTime?
+  // AI metadata
+  aiSummary                   String?
+  aiSentiment                 Sentiment?
+  aiTags                      String[]
+  customAttributes            Json               @default("{}")
+  // Deterministic-flow runtime position + variables (hybrid flow engine).
+  // Shape: { flowId, runtime: { currentGroupId, currentBlockId, variables, ... } }
+  flowState                   Json?
+  // Set by forward — points at the source conversation. Null otherwise.
+  forwardedFromConversationId String?
+  // How this conversation came into existence. Only used for billing: the
+  // published terms count "new conversations" the customer's contacts start,
+  // and explicitly exclude the ones the account manufactures for itself
+  // (a broadcast nobody answered, a forward, a migration import).
+  origin                      ConversationOrigin @default(INBOUND)
+  // The instant this conversation became a billable "new conversation", or
+  // null if it never did.
+  //
+  // For everything a contact or an agent starts, this is creation time. A
+  // BROADCAST conversation starts null and is stamped when the contact first
+  // answers — an untouched broadcast to 10.000 numbers is 10.000 rows and
+  // zero billable conversations, which is what the terms say. A FORWARD or an
+  // IMPORT stays null for good: the first was already billed as the
+  // conversation it was forwarded from, the second happened on another
+  // system and its history is not a fresh month's usage.
+  billableAt                  DateTime?
+  createdAt                   DateTime           @default(now())
+  updatedAt                   DateTime           @updatedAt
+
+  account            Account                   @relation(fields: [accountId], references: [id])
+  inbox              Inbox                     @relation(fields: [inboxId], references: [id])
+  contact            Contact                   @relation(fields: [contactId], references: [id])
+  contactInbox       ContactInbox              @relation(fields: [contactInboxId], references: [id])
+  assignee           User?                     @relation("AssignedConversations", fields: [assigneeId], references: [id])
+  team               Team?                     @relation(fields: [teamId], references: [id])
+  messages           Message[]
+  participants       ConversationParticipant[]
+  aiAgentSession     AiAgentSession?
+  automationRuns     AutomationRuleRun[]
+  conversationLabels ConversationLabel[]
+  notifications      Notification[]
+  supportTickets     SupportTicket[]
+  csatSurvey         CsatSurvey?
+  aiUsageEvents      AiUsageEvent[]
+
+  @@unique([accountId, displayId])
+  @@index([accountId, status])
+  @@index([accountId, controlMode])
+  @@index([accountId, inboxId])
+  @@index([assigneeId])
+  @@index([teamId])
+  @@index([accountId, lastMessageAt])
+  // The new-conversations meter reads this on every usage check and once per
+  // account on the month-end run.
+  @@index([accountId, billableAt])
+  @@index([slaBreachedNotifiedAt])
+  @@index([accountId, protocol])
+  @@index([contactId, createdAt])
+}
+
+enum ConversationStatus {
+  OPEN
+  RESOLVED
+  PENDING
+}
+
+enum ConversationOrigin {
+  // A contact wrote in on a channel (WhatsApp, widget, email).
+  INBOUND
+  // An agent opened it from the desk.
+  AGENT
+  // Created to deliver a broadcast. Billable only once the contact answers.
+  BROADCAST
+  // Created by forwarding another conversation. Never billable.
+  FORWARD
+  // Created through the public API.
+  API
+  // Written by a migration or an import. Never billable.
+  IMPORT
+}
+
+enum ControlMode {
+  BOT
+  HUMAN
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum Sentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+model Message {
+  id                String        @id @default(cuid())
+  conversationId    String
+  inboxId           String
+  accountId         String
+  senderType        SenderType
+  senderUserId      String?
+  senderAgentBotId  String?
+  senderContactId   String?
+  content           String?
+  contentType       ContentType   @default(TEXT)
+  contentAttributes Json          @default("{}")
+  status            MessageStatus @default(SENT)
+  isPrivate         Boolean       @default(false)
+  externalSourceId  String?
+  inReplyToId       String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  account      Account      @relation(fields: [accountId], references: [id])
+  senderUser   User?        @relation("UserSentMessages", fields: [senderUserId], references: [id])
+  attachments  Attachment[]
+
+  @@index([conversationId, createdAt])
+  @@index([inboxId])
+  @@index([externalSourceId])
+  // Trigram index for the assistant's `search_conversations`, which does an
+  // ILIKE '%term%'. A btree cannot serve a leading wildcard; without this it
+  // is a sequential scan over every message on the account.
+  @@index([content(ops: raw("gin_trgm_ops"))], type: Gin, name: "Message_content_trgm_idx")
+}
+
+enum SenderType {
+  CONTACT
+  USER
+  AGENT_BOT
+  SYSTEM
+}
+
+enum ContentType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  FILE
+  LOCATION
+  CONTACT_CARD
+  CARDS
+  QUICK_REPLIES
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model Attachment {
+  id           String   @id @default(cuid())
+  accountId    String
+  uploaderId   String? // user who uploaded — null if uploaded by a contact (widget/WhatsApp)
+  messageId    String? // null while draft; set when attached to a message
+  storageKey   String // bucket-relative path or local file path
+  fileType     FileType
+  fileUrl      String
+  fileName     String?
+  fileSize     Int?
+  mimeType     String?
+  // AI metadata (P1: filled by background jobs)
+  aiCaption    String?
+  aiTranscript String?
+  createdAt    DateTime @default(now())
+
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  uploader User?    @relation(fields: [uploaderId], references: [id], onDelete: SetNull)
+  message  Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([accountId, createdAt])
+}
+
+enum FileType {
+  IMAGE
+  VIDEO
+  AUDIO
+  FILE
+  LOCATION
+  FALLBACK
+}
+
+model ConversationParticipant {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MODULE 5: AI AGENT BOTS + SESSIONS
+// ─────────────────────────────────────────────────────────────────────────
+
+model AgentBot {
+  id                          String   @id @default(cuid())
+  accountId                   String
+  name                        String
+  description                 String?
+  systemPrompt                String
+  model                       String   @default("claude-opus-4-7")
+  temperature                 Float    @default(0.7)
+  toolsEnabled                Json // [{ name: "send_message", config: {} }, ...]
+  customTools                 Json     @default("[]") // per-account tool definitions
+  fallbackToHuman             Boolean  @default(true)
+  // AUTO_SAFE confidence threshold (0-100). Replies scoring >= this value
+  // get auto-sent; below → kept as a DRAFT for human review.
+  autoSafeConfidenceThreshold Int      @default(80)
+  // Per-bot budget cap (USD per day)
+  dailyBudgetUsd              Decimal  @default(10.00) @db.Decimal(10, 2)
+  // This agent's own knowledge base: articles carrying ANY of these tags.
+  // Empty means the whole account's base, which is how every agent behaved
+  // before agents had a base of their own.
+  knowledgeTags               String[] @default([])
+  isActive                    Boolean  @default(true)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  account  Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  inboxes  Inbox[]
+  sessions AiAgentSession[]
+
+  @@index([accountId])
+}
+
+model AiAgentSession {
+  id             String   @id @default(cuid())
+  accountId      String
+  conversationId String   @unique
+  // Nullable since 2026-09-17: a flow's AI block and the GUIDED deviation
+  // classifier spend on the account without any agent bot attached to the
+  // inbox, and their cost has to land somewhere the monthly budget can see.
+  agentBotId     String?
+  state          Json // serialized agent state (messages, tool calls, etc.)
+  totalTokensIn  Int      @default(0)
+  totalTokensOut Int      @default(0)
+  totalCostUsd   Decimal  @default(0) @db.Decimal(10, 4)
+  lastActiveAt   DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agentBot     AgentBot?       @relation(fields: [agentBotId], references: [id])
+  toolCalls    AgentToolCall[]
+
+  @@index([accountId])
+  @@index([agentBotId])
+  @@index([lastActiveAt])
+}
+
+/// One LLM call. The ledger every AI number on an invoice is derived from.
+///
+/// Mirrors Nebula's `ai_usage_events` (live since 11/09) so the two products
+/// can be reconciled line by line. Before this table existed, Cosmika knew
+/// only an aggregate cost per conversation, a flow's AI block and the
+/// deviation classifier recorded nothing at all, and there was no way to
+/// answer the one question the allowance is sold on: how many conversations
+/// did the AI answer this month.
+///
+/// Rows are append-only and never updated. Writing one must never be able to
+/// fail a customer's turn: `AiUsageService.record` swallows its own errors.
+model AiUsageEvent {
+  id               String        @id @default(cuid())
+  accountId        String
+  conversationId   String?
+  agentBotId       String?
+  source           AiUsageSource
+  provider         String
+  model            String
+  inputTokens      Int           @default(0)
+  outputTokens     Int           @default(0)
+  cacheReadTokens  Int           @default(0)
+  cacheWriteTokens Int           @default(0)
+  /// Cost at the model's price when the call was made, so a later price
+  /// change never rewrites history.
+  costUsd          Decimal       @default(0) @db.Decimal(12, 6)
+  /// Whether this call's output actually reached the CONTACT. The allowance
+  /// counts conversations the AI answered, so an internal summary, a private
+  /// draft and a silent classifier are all `false` and none of them costs the
+  /// customer a conversation.
+  replied          Boolean       @default(false)
+  /// Reserved: a call billed to the customer's own provider key, which is
+  /// never counted against the allowance. Cosmika has no customer keys yet,
+  /// so this is always false; the column exists so the count is written once.
+  ownKey           Boolean       @default(false)
+  metadata         Json?
+  createdAt        DateTime      @default(now())
+
+  account      Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, createdAt])
+  /// The allowance query: distinct conversations the AI replied in, this month.
+  @@index([accountId, replied, createdAt])
+  @@index([conversationId])
+}
+
+enum AiUsageSource {
+  // The conversational agent answering a contact.
+  AGENT_BOT
+  // A deterministic flow's AI block.
+  FLOW_BLOCK
+  // The GUIDED off-script classifier.
+  FLOW_DEVIATION
+  // The administrative assistant. Internal: never counted.
+  ADMIN_AGENT
+}
+
+/// One alert already sent, so the hourly sweep cannot send it twice.
+///
+/// Nebula keeps this state in a JSON blob on the account, which is hard to
+/// query and easy to clobber; a row with a unique key makes "send once per
+/// account per month per kind" a database guarantee instead of a convention.
+model UsageAlert {
+  id        String   @id @default(cuid())
+  accountId String
+  /// Billing month, `YYYY-MM` in America/Sao_Paulo.
+  month     String
+  /// `plan_90`, `plan_100`, `ai_80`, `ai_100`, `ai_cap`.
+  kind      String
+  sentAt    DateTime @default(now())
+  metadata  Json?
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, month, kind])
+  @@index([accountId, month])
+}
+
+model AgentToolCall {
+  id           String         @id @default(cuid())
+  sessionId    String
+  toolName     String
+  /// The Anthropic `tool_use` block id this call answers. Nullable because
+  /// rows written before the confirm flow learned to close the pair have none.
+  toolUseId    String?
+  input        Json
+  output       Json?
+  errorMessage String?
+  status       ToolCallStatus
+  costUsd      Decimal        @default(0) @db.Decimal(10, 6)
+  durationMs   Int?
+  createdAt    DateTime       @default(now())
+
+  session AiAgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([toolName])
+  @@index([status])
+}
+
+enum ToolCallStatus {
+  PENDING
+  SUCCESS
+  ERROR
+  CONFIRMED
+  REJECTED
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AUXILIARY: TEAMS + WORKING HOURS + HOLIDAYS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Team {
+  id          String   @id @default(cuid())
+  accountId   String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  account       Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  members       TeamMember[]
+  conversations Conversation[]
+
+  @@index([accountId])
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
+model WorkingHour {
+  id           String  @id @default(cuid())
+  accountId    String
+  inboxId      String
+  dayOfWeek    Int // 0 = Sunday, 6 = Saturday
+  openHour     Int // 0-23
+  openMinute   Int     @default(0)
+  closeHour    Int
+  closeMinute  Int     @default(0)
+  closedAllDay Boolean @default(false)
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  inbox   Inbox   @relation(fields: [inboxId], references: [id], onDelete: Cascade)
+
+  @@unique([inboxId, dayOfWeek])
+}
+
+model Holiday {
+  id        String   @id @default(cuid())
+  accountId String
+  name      String
+  date      DateTime
+  createdAt DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MODULE 9: AUTOMATION RULES
+// ─────────────────────────────────────────────────────────────────────────
+
+enum AutomationTriggerEvent {
+  CONVERSATION_CREATED
+  MESSAGE_CREATED // inbound only
+  CONVERSATION_UPDATED // status / priority / assignee / team change
+}
+
+model AutomationRule {
+  id                     String                 @id @default(cuid())
+  accountId              String
+  name                   String
+  description            String?
+  triggerEvent           AutomationTriggerEvent
+  isActive               Boolean                @default(true)
+  conditions             Json // Array<{ field, op, value }>
+  actions                Json // Array<{ kind, value }>
+  runOncePerConversation Boolean                @default(true)
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  account Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  runs    AutomationRuleRun[]
+
+  @@index([accountId, triggerEvent, isActive])
+}
+
+model AutomationRuleRun {
+  id             String   @id @default(cuid())
+  ruleId         String
+  conversationId String
+  ranAt          DateTime @default(now())
+  matched        Boolean
+  result         Json?
+
+  rule         AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  conversation Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, conversationId])
+  @@index([conversationId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Canned responses (account-scoped reusable replies, expanded via /shortcode)
+// ─────────────────────────────────────────────────────────────────────────
+
+model CannedResponse {
+  id        String   @id @default(cuid())
+  accountId String
+  shortcode String // e.g. "refund" → typed as /refund in the composer
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, shortcode])
+  @@index([accountId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Labels (colored tags on conversations, account-scoped)
+// ─────────────────────────────────────────────────────────────────────────
+
+model Label {
+  id        String   @id @default(cuid())
+  accountId String
+  title     String
+  color     String // hex like #6366F1
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account            Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  conversationLabels ConversationLabel[]
+
+  @@unique([accountId, title])
+  @@index([accountId])
+}
+
+model ConversationLabel {
+  id             String   @id @default(cuid())
+  conversationId String
+  labelId        String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  label        Label        @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, labelId])
+  @@index([labelId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Notifications (in-app bell — mentions, assignments, future event types)
+// ─────────────────────────────────────────────────────────────────────────
+
+// Per-user saved filters on the conversation list. Stored as a JSON blob
+// mirroring (a subset of) ListConversationsQuery — applied when the user
+// activates the view.
+model SavedView {
+  id        String   @id @default(cuid())
+  accountId String
+  userId    String // owner — views are private to a single user for now
+  name      String
+  icon      String? // optional lucide icon name
+  // Which record list this view belongs to. Every pre-existing row is a
+  // conversations view, hence the default; the list API scopes by this so
+  // contact views never leak into the conversations sidebar.
+  entity    String   @default("CONVERSATIONS")
+  filters   Json // per-entity payload; see shared/schemas/saved-view.ts
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, userId, entity, position])
+}
+
+enum NotificationType {
+  MENTION
+  ASSIGNMENT
+  // Someone was given a conversation only because nobody was on shift. Sent to
+  // whoever can act on a coverage hole, not to the person who received it:
+  // they get an ordinary ASSIGNMENT and would otherwise be told twice.
+  ASSIGNMENT_FALLBACK
+  // A conversation crossed its SLA without the first reply.
+  SLA_BREACH
+}
+
+// Per-user, per-account notification opt-outs. Absent row = everything on.
+model NotificationPreference {
+  id                 String   @id @default(cuid())
+  accountId          String
+  userId             String
+  mentionsEnabled    Boolean  @default(true)
+  assignmentsEnabled Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, userId])
+  @@index([accountId, userId])
+}
+
+model Notification {
+  id                String           @id @default(cuid())
+  accountId         String
+  // The user being notified.
+  userId            String
+  type              NotificationType
+  // What it points at — both nullable so we don't lose the row if the
+  // conversation/message gets deleted.
+  conversationId    String?
+  messageId         String?
+  // Who caused this notification (null for system events).
+  mentionedByUserId String?
+  readAt            DateTime?
+  createdAt         DateTime         @default(now())
+
+  account      Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user         User          @relation("NotificationsForUser", fields: [userId], references: [id], onDelete: Cascade)
+  mentionedBy  User?         @relation("NotificationsByUser", fields: [mentionedByUserId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, userId, readAt])
+  @@index([userId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TIER 3: CUSTOM ATTRIBUTES / AGENT AVAILABILITY / AUDIT / WEBHOOKS
+// ─────────────────────────────────────────────────────────────────────────
+
+enum CustomAttributeTarget {
+  CONTACT
+  CONVERSATION
+}
+
+enum CustomAttributeType {
+  TEXT
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+}
+
+model CustomAttribute {
+  id        String                @id @default(cuid())
+  accountId String
+  target    CustomAttributeTarget
+  key       String // machine-name used in customAttributes JSON
+  label     String
+  type      CustomAttributeType
+  options   Json? // array of { value, label } for SELECT
+  position  Int                   @default(0)
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, target, key])
+  @@index([accountId, target, position])
+}
+
+model AgentAvailability {
+  id           String  @id @default(cuid())
+  accountId    String
+  memberId     String // AccountMember.id
+  dayOfWeek    Int // 0 = Sunday, 6 = Saturday
+  openHour     Int // 0-23
+  openMinute   Int     @default(0)
+  closeHour    Int
+  closeMinute  Int     @default(0)
+  closedAllDay Boolean @default(false)
+
+  account Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  member  AccountMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, dayOfWeek])
+  @@index([accountId, memberId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  accountId String
+  actorId   String?
+  action    String // e.g. "account.update", "member.invite", "inbox.delete"
+  target    String? // human-readable target reference, e.g. "inbox:cmpib123"
+  metadata  Json? // diff or extra context
+  createdAt DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  actor   User?   @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, createdAt])
+  @@index([accountId, action, createdAt])
+  @@index([accountId, actorId, createdAt])
+}
+
+model Webhook {
+  id        String   @id @default(cuid())
+  accountId String
+  name      String
+  url       String
+  secret    String // HMAC signing secret
+  events    String[] // subscribed event names
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account    Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([accountId, isActive])
+}
+
+model WebhookDelivery {
+  id             String    @id @default(cuid())
+  webhookId      String
+  event          String
+  payload        Json
+  status         String // "PENDING" | "SUCCESS" | "FAILED"
+  responseStatus Int?
+  errorMessage   String?
+  attempts       Int       @default(0)
+  // When the worker should next try this delivery. PENDING rows with
+  // nextRetryAt<=NOW() are picked up by the scheduled worker.
+  nextRetryAt    DateTime  @default(now())
+  lastAttemptAt  DateTime?
+  createdAt      DateTime  @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@index([status, nextRetryAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CSAT — post-resolution customer satisfaction survey
+// ─────────────────────────────────────────────────────────────────────────
+
+model CsatSurvey {
+  id              String     @id @default(cuid())
+  accountId       String
+  conversationId  String     @unique
+  // Public submission token. The link sent to the contact embeds this.
+  token           String     @unique @default(cuid())
+  // Snapshot of who handled the conversation when the survey was generated.
+  assignedAgentId String?
+  inboxId         String
+  // Expires 30 days after promptedAt by default. Public endpoints reject
+  // submission past expiry; admins can still see the row.
+  expiresAt       DateTime?
+  promptedAt      DateTime   @default(now())
+  respondedAt     DateTime?
+  // CSAT: 1..5. NPS: 0..10. The type is snapshotted from the account at
+  // creation, so switching the account setting never reinterprets old rows.
+  type            SurveyType @default(CSAT)
+  rating          Int?
+  // Team that held the conversation when the survey was generated (NPS by team).
+  teamId          String?
+  comment         String?
+
+  account      Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, respondedAt])
+  @@index([accountId, inboxId, respondedAt])
+  @@index([accountId, assignedAgentId, respondedAt])
+  @@index([accountId, type, respondedAt])
+}
+
+enum SurveyType {
+  CSAT
+  NPS
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SLA — service-level agreements per priority
+// ─────────────────────────────────────────────────────────────────────────
+
+model SlaPolicy {
+  id                         String   @id @default(cuid())
+  accountId                  String
+  name                       String
+  // Targets in minutes. Defaults are reasonable starting points; admins tune.
+  firstResponseLowMinutes    Int      @default(480) // 8h
+  firstResponseNormalMinutes Int      @default(240) // 4h
+  firstResponseHighMinutes   Int      @default(60) // 1h
+  firstResponseUrgentMinutes Int      @default(15)
+  // When set, the first-response target in SECONDS for every priority,
+  // overriding the minute targets above (a 60 s queue target, say).
+  firstResponseSeconds       Int?
+  resolutionLowMinutes       Int      @default(10080) // 7d
+  resolutionNormalMinutes    Int      @default(2880) // 2d
+  resolutionHighMinutes      Int      @default(480) // 8h
+  resolutionUrgentMinutes    Int      @default(120) // 2h
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  inboxes Inbox[]
+
+  @@index([accountId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Knowledge base — curated articles + vector search for AI RAG
+// ─────────────────────────────────────────────────────────────────────────
+
+enum ArticleStatus {
+  DRAFT
+  PUBLISHED
+}
+
+model Article {
+  id        String                       @id @default(cuid())
+  accountId String
+  authorId  String?
+  // Per-account unique slug — used in URLs and as a stable handle.
+  slug      String
+  title     String
+  // Markdown body — short articles render in-app, long ones in the agent
+  // context only summarize.
+  content   String
+  status    ArticleStatus                @default(DRAFT)
+  tags      String[]
+  // 1536-d vector from OpenAI text-embedding-3-small. Generated on
+  // create/update; nullable when COSMIKA_AI_STUB=1.
+  embedding Unsupported("vector(1536)")?
+  createdAt DateTime                     @default(now())
+  updatedAt DateTime                     @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, slug])
+  @@index([accountId, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// API keys — service-account auth for programmatic clients
+// ─────────────────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  accountId  String
+  name       String
+  // First 8 chars of the secret, kept plaintext for display + lookup. The
+  // full secret is only ever stored as `secretHash` (sha256 hex).
+  prefix     String    @unique
+  secretHash String
+  // 2FA-style guard: revoking sets revokedAt + a guard checks it on auth.
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, revokedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Support tickets — the durable record behind the flow's Ticket blocks
+// ─────────────────────────────────────────────────────────────────────────
+
+model SupportTicket {
+  id             String       @id @default(cuid())
+  accountId      String
+  // Shown to the customer as `#42`. Globally unique (a Postgres sequence),
+  // same convention as Conversation.displayId.
+  number         Int          @default(autoincrement())
+  // Where the ticket was raised. Both optional so a ticket outlives the
+  // conversation that opened it.
+  conversationId String?
+  contactId      String?
+  subject        String
+  description    String
+  category       String?
+  priority       Priority     @default(NORMAL)
+  status         TicketStatus @default(OPEN)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  account      Account              @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  conversation Conversation?        @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  contact      Contact?             @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  events       SupportTicketEvent[]
+
+  @@index([accountId, status])
+  @@index([conversationId])
+  @@index([contactId])
+}
+
+model SupportTicketEvent {
+  id        String   @id @default(cuid())
+  ticketId  String
+  // Free-text update appended by a flow, an agent, or the customer.
+  body      String
+  createdAt DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+}
+
+enum TicketStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Admin assistant — an agent an administrator drives against their own
+// account. Separate from AiAgentSession, which is keyed one-per-conversation:
+// an admin session has no conversation, and that uniqueness is load-bearing
+// for the customer-facing agent.
+// ─────────────────────────────────────────────────────────────────────────
+
+model AdminAgentSession {
+  id             String   @id @default(cuid())
+  accountId      String
+  // The administrator this session belongs to. The assistant acts as them:
+  // every audit entry names this human, never a shared service identity.
+  userId         String
+  title          String?
+  // Serialised turn history (messages + tool calls), same shape as
+  // AiAgentSession.state.
+  state          Json
+  totalTokensIn  Int      @default(0)
+  totalTokensOut Int      @default(0)
+  totalCostUsd   Decimal  @default(0) @db.Decimal(10, 4)
+  lastActiveAt   DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  account   Account              @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  toolCalls AdminAgentToolCall[]
+
+  @@index([accountId, userId, lastActiveAt])
+}
+
+model AdminAgentToolCall {
+  id           String         @id @default(cuid())
+  sessionId    String
+  toolName     String
+  input        Json
+  output       Json?
+  errorMessage String?
+  // PENDING only ever means "waiting for a human to approve"; it is set for a
+  // critical tool while the account is in approval mode.
+  status       ToolCallStatus
+  critical     Boolean        @default(false)
+  durationMs   Int?
+  createdAt    DateTime       @default(now())
+
+  session AdminAgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([status])
+}

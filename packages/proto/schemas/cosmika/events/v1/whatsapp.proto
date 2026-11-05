@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package cosmika.events.v1;
+
+option go_package = "github.com/cosmoorg/cosmika/packages/proto/gen/go/cosmika/events/v1;eventsv1";
+
+import "google/protobuf/timestamp.proto";
+
+// WhatsappInbound is what apps/whatsapp-ingest emits onto the queue after
+// validating + de-duping a Meta webhook delivery. apps/api consumes it.
+message WhatsappInbound {
+  string account_id = 1;
+  string inbox_id = 2;
+  string waba_id = 3;
+  string phone_number_id = 4;
+  string contact_wa_id = 5;
+  string contact_name = 6;
+  string message_wa_id = 7;
+  string text = 8;
+  google.protobuf.Timestamp received_at = 9;
+}
